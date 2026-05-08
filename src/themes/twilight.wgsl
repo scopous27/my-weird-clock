@@ -115,9 +115,10 @@ fn ring_brightness(
     if (value < 0) { value = value + n_slots; }
 
     // Map screen pixel into the slot's tangent/radial frame, then scale to
-    // digit-local coords. Because (arc, radial) is the slot's local frame,
-    // digits curve naturally with the ring like text on a record label.
-    let arc_dist = R * dtheta;
+    // digit-local coords. The tangent axis runs CW so digit-local +x lines
+    // up with screen +x at the top of the dial; otherwise digits would be
+    // mirrored horizontally where the highlight sits.
+    let arc_dist = -R * dtheta;
     let local = vec2<f32>(arc_dist, radial_offset) * scale;
 
     var d_int: f32 = 0.0;
