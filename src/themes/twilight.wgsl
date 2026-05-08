@@ -1,19 +1,16 @@
-// twilight.wgsl — Twilight Zone clock with three rotating digit rings.
+// twilight.wgsl — Twilight Zone clock with three vertically-stacked rotating
+// reels. Each "ring" is now a horizontal cylinder (think slot-machine reel
+// or paddle-wheel) with digits engraved on its outer surface; the viewer
+// looks at the front-facing arc of each. As a reel turns, its engraved
+// numbers roll vertically through the visible window. Each reel has an
+// independent drifting position and a wobbling tilt so the stack feels
+// like three loose discs floating in front of the cosmic backdrop instead
+// of a rigid concentric assembly.
 //
-// Each ring is a band of 7-segment digits riding on the dial; each ring
-// rotates at the rate of its time unit (seconds: 1 rev / minute, minutes:
-// 1 rev / hour, hours: 1 rev / 12 hours), so the digit at the top of the
-// dial — the "highlight" — is always the current value. Numbers fade in
-// and out as they approach and leave the highlight zone.
-//
-// Ring layout (inner → outer): hours, minutes, seconds. The seconds ring
-// gets the largest circumference because it has 60 digits and turns the
-// fastest, like a watch's sweep second hand on the rim.
-//
-// Screensaver-grade pixel motion comes from three concurrent drifts:
-//   * Lissajous translation of the whole dial (~90 s period).
-//   * Tilt oscillation: the perspective ellipse "rocks".
-//   * Each ring's own rotation sweeps every pixel along its circumference.
+// Ring rotation rates match their time unit:
+//   * hours reel  — 1 revolution / 12 hours
+//   * minutes reel — 1 revolution / hour
+//   * seconds reel — 1 revolution / minute
 
 struct Uniforms {
     resolution: vec2<f32>,
@@ -39,11 +36,6 @@ fn hash21(p: vec2<f32>) -> f32 {
     return fract(sin(h) * 43758.5453123);
 }
 
-fn ang_dist(a: f32, b: f32) -> f32 {
-    let d = a - b;
-    return abs(atan2(sin(d), cos(d)));
-}
-
 fn sdf_box(p: vec2<f32>, c: vec2<f32>, b: vec2<f32>) -> f32 {
     let q = abs(p - c) - b;
     return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0);
@@ -66,7 +58,6 @@ fn seg_mask(d: i32) -> u32 {
 }
 
 // 7-segment digit. Cell occupies x in [-0.5, 0.5], y in [-1.0, 1.0].
-// Returns (sharp core | soft outer halo).
 fn digit(p: vec2<f32>, value: i32) -> f32 {
     let m = seg_mask(value);
     let bh = vec2<f32>(0.42, 0.07);
@@ -84,42 +75,59 @@ fn digit(p: vec2<f32>, value: i32) -> f32 {
     return max(core, glow);
 }
 
-// Brightness contribution of one digit ring at the current pixel.
+// Brightness contribution of one engraved-cylinder reel at the current pixel.
 //
-// `R`           — ring radius in dial-tilted coords.
-// `scale`       — digit-local units per dial-coord unit (controls digit size).
-// `n_slots`     — 12 for hours (display 1..12), 60 for minutes/seconds.
-// `ring_rot`    — current angular rotation of this ring (radians).
-// `highlight`   — angular position of the highlight zone (radians).
-// `window`      — angular half-width of the highlight fade.
-fn ring_brightness(
-    r_pix: f32, theta_pix: f32,
-    R: f32, scale: f32, n_slots: i32, ring_rot: f32,
-    highlight: f32, window: f32,
+// Geometry: a cylinder with axis along the reel's local x, radius R, axial
+// length L, optionally tilted by `tilt` radians. The viewer looks down -z
+// onto the cylinder's front-facing arc; the surface point at screen offset
+// (dx, dy) is at circumferential angle asin(dy/R). After applying the
+// reel's rotation, we find which engraved slot the pixel falls in and
+// render that digit in cylinder-surface coords (axial, arc).
+fn reel_brightness(
+    uv_pixel: vec2<f32>,
+    cx: f32, cy: f32,
+    tilt: f32,
+    R: f32, L: f32,
+    n_slots: i32,
+    ring_rot: f32,
+    window: f32,
 ) -> f32 {
-    let radial_offset = r_pix - R;
-    if (abs(radial_offset) > 0.07) { return 0.0; }
+    // Center on the reel and rotate into its tilted axial frame.
+    let dxr = uv_pixel.x - cx;
+    let dyr = uv_pixel.y - cy;
+    let cs = cos(tilt);
+    let sn = sin(tilt);
+    let dx =  cs * dxr + sn * dyr;
+    let dy = -sn * dxr + cs * dyr;
 
-    let h_dist = ang_dist(theta_pix, highlight);
-    let highlight_fade = smoothstep(window, window * 0.15, h_dist);
+    // Outside the cylinder's projected footprint?
+    if (abs(dx) > L * 0.5) { return 0.0; }
+    if (abs(dy) >= R * 0.999) { return 0.0; }
 
-    // Local angle on the ring (which slot does this pixel fall into).
-    let local_ang = theta_pix - ring_rot;
+    // Project onto cylinder front face.
+    let theta_circ = asin(dy / R);
+
+    // Vertical visibility cone: the engraved surface fades out as it curves
+    // away from the viewer at the top and bottom of the reel.
+    let visib_fade = smoothstep(window, window * 0.20, abs(theta_circ));
+    let axial_fade = smoothstep(L * 0.5, L * 0.5 - 0.05, abs(dx));
+    let mask = visib_fade * axial_fade;
+
+    // Cylinder-local angle on the engraved surface (rotates with the reel).
+    let cyl_angle = theta_circ + ring_rot;
     let slot_pitch = TAU / f32(n_slots);
-    let slot_idx_f = local_ang / slot_pitch;
-    let slot_idx = i32(floor(slot_idx_f + 0.5));
+    let slot_idx = i32(floor(cyl_angle / slot_pitch + 0.5));
     let slot_center = f32(slot_idx) * slot_pitch;
-    let dtheta = local_ang - slot_center;
+    let dtheta = cyl_angle - slot_center;
 
     var value = slot_idx % n_slots;
     if (value < 0) { value = value + n_slots; }
 
-    // Map screen pixel into the slot's tangent/radial frame, then scale to
-    // digit-local coords. The tangent axis runs CW so digit-local +x lines
-    // up with screen +x at the top of the dial; otherwise digits would be
-    // mirrored horizontally where the highlight sits.
-    let arc_dist = -R * dtheta;
-    let local = vec2<f32>(arc_dist, radial_offset) * scale;
+    // Digit-local frame: x along the cylinder axis (horizontal screen), y
+    // along arc length on the surface (vertical screen near the front).
+    let arc_dist = R * dtheta;
+    let scale = 80.0;
+    let local = vec2<f32>(dx, arc_dist) * scale;
 
     var d_int: f32 = 0.0;
     if (n_slots == 12) {
@@ -140,37 +148,25 @@ fn ring_brightness(
         d_int = max(digit(p_tens, value / 10), digit(p_ones, value % 10));
     }
 
-    // Faint always-on ring trace + brighter band right at the highlight.
-    let band = smoothstep(0.014, 0.0, abs(radial_offset));
-    let band_dim = band * 0.05;
-    let band_high = band * highlight_fade * 0.18;
+    // Faint cylinder body so the reel reads as a physical object even
+    // between digits, plus a brighter horizontal "read line" through the
+    // front-most strip where the current value sits.
+    let body = mask * 0.05;
+    let read_line = smoothstep(0.006, 0.0, abs(dy)) * axial_fade * 0.18;
 
-    return d_int * highlight_fade * 0.95 + band_dim + band_high;
+    return d_int * mask * 0.95 + body + read_line;
 }
 
 @fragment
 fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let res = u.resolution;
-    var uv0 = (frag.xy - 0.5 * res) / res.y;
-    uv0.y = -uv0.y;
+    var uv = (frag.xy - 0.5 * res) / res.y;
+    uv.y = -uv.y;
 
     let t = u.time;
 
-    // ---------- screensaver drift: slow Lissajous translation ----------
-    let drift = vec2<f32>(
-        0.085 * sin(t * 0.053),
-        0.055 * cos(t * 0.071)
-    );
-    let uv = uv0 - drift;
-
-    // ---------- dial: oscillating perspective tilt ----------
-    let tilt = 0.50 + 0.13 * sin(t * 0.041);
-    let p = vec2<f32>(uv.x, uv.y / tilt);
-    let r = length(p);
-    let theta = atan2(p.y, p.x);
-
     // ---------- spiral vortex background (anchored to screen) ----------
-    var p_bg = vec2<f32>(uv0.x, uv0.y / 0.7);
+    var p_bg = vec2<f32>(uv.x, uv.y / 0.7);
     let r_bg = length(p_bg);
     let th_bg = atan2(p_bg.y, p_bg.x);
     let arms = 5.0;
@@ -183,24 +179,35 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let phase2 = -th_bg * (arms - 2.0) - log(r_bg + 0.05) * (twist * 0.6) - t * 0.18;
     let swirl2 = 0.5 + 0.5 * sin(phase2);
     bg = bg * (0.78 + 0.22 * swirl2);
-    let shimmer = 0.5 + 0.5 * sin(t * 1.4 + uv0.x * 9.0 + uv0.y * 6.5);
+    let shimmer = 0.5 + 0.5 * sin(t * 1.4 + uv.x * 9.0 + uv.y * 6.5);
     bg = bg + 0.04 * (shimmer - 0.5);
-    let g_noise = hash21(uv0 * res * 0.5 + vec2<f32>(t * 60.0, t * 41.0));
+    let g_noise = hash21(uv * res * 0.5 + vec2<f32>(t * 60.0, t * 41.0));
     bg = bg + (g_noise - 0.5) * 0.07;
     var col = vec3<f32>(bg);
 
-    // ---------- three rotating digit rings ----------
-    // Ring rotation: highlight − (current_value × slot_pitch). u.angles already
-    // encodes current_value × slot_pitch for each unit.
-    let highlight = PI * 0.5;        // top of the dial
-    let win = 0.42;                  // visibility cone (radians half-width)
-    let r_h = highlight - u.angles.x;  // 1 revolution / 12 hours
-    let r_m = highlight - u.angles.y;  // 1 revolution / hour
-    let r_s = highlight - u.angles.z;  // 1 revolution / minute
+    // ---------- three independently floating reels ----------
+    let R = 0.30;        // cylinder radius (drives circumference / digit fit)
+    let L = 0.40;        // axial length (horizontal extent on screen)
+    let win = 0.30;      // visibility cone half-angle (radians)
 
-    let i_h = ring_brightness(r, theta, 0.18, 50.0, 12, r_h, highlight, win);
-    let i_m = ring_brightness(r, theta, 0.32, 80.0, 60, r_m, highlight, win);
-    let i_s = ring_brightness(r, theta, 0.46, 80.0, 60, r_s, highlight, win);
+    // Hours — top
+    let cx_h =  0.00 + 0.05 * sin(t * 0.073) + 0.03 * cos(t * 0.131);
+    let cy_h =  0.32 + 0.04 * sin(t * 0.091);
+    let tilt_h = 0.08 * sin(t * 0.083) + 0.03 * cos(t * 0.157);
+
+    // Minutes — middle
+    let cx_m = -0.04 + 0.05 * sin(t * 0.057) - 0.025 * cos(t * 0.119);
+    let cy_m =  0.00 + 0.05 * sin(t * 0.063);
+    let tilt_m = -0.07 * sin(t * 0.071) + 0.04 * cos(t * 0.139);
+
+    // Seconds — bottom
+    let cx_s =  0.03 + 0.05 * sin(t * 0.103) + 0.04 * cos(t * 0.067);
+    let cy_s = -0.32 + 0.04 * sin(t * 0.121);
+    let tilt_s = 0.09 * sin(t * 0.061) - 0.04 * cos(t * 0.097);
+
+    let i_h = reel_brightness(uv, cx_h, cy_h, tilt_h, R, L, 12, u.angles.x, win);
+    let i_m = reel_brightness(uv, cx_m, cy_m, tilt_m, R, L, 60, u.angles.y, win);
+    let i_s = reel_brightness(uv, cx_s, cy_s, tilt_s, R, L, 60, u.angles.z, win);
     col = col + vec3<f32>(i_h + i_m + i_s);
 
     // ---------- vignette + scanlines ----------
