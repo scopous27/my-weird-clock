@@ -47,11 +47,14 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Resized(size) => state.resize(size),
-            WindowEvent::RedrawRequested => {
-                state.render();
-                state.window().request_redraw();
-            }
+            WindowEvent::RedrawRequested => state.render(),
             _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(state) = self.state.as_ref() {
+            state.window().request_redraw();
         }
     }
 }
