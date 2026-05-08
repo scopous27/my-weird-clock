@@ -13,6 +13,7 @@ struct Uniforms {
     time: f32,
     _pad0: f32,
     angles: [f32; 4],
+    time_hms: [f32; 4],
 }
 
 pub struct State {
@@ -90,6 +91,7 @@ impl State {
             time: 0.0,
             _pad0: 0.0,
             angles: [0.0; 4],
+            time_hms: [12.0, 0.0, 0.0, 0.0],
         };
         let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("uniforms"),
@@ -177,7 +179,9 @@ impl State {
 
     pub fn render(&mut self) {
         let now = chrono::Local::now();
-        let h = (now.hour() % 12) as f32 + now.minute() as f32 / 60.0;
+        let hh = now.hour() % 12;
+        let h_disp = if hh == 0 { 12 } else { hh };
+        let h_for_angle = hh as f32 + now.minute() as f32 / 60.0;
         let m = now.minute() as f32 + now.second() as f32 / 60.0;
         let s = now.second() as f32 + now.nanosecond() as f32 / 1_000_000_000.0;
         let tau = std::f32::consts::TAU;
@@ -186,9 +190,15 @@ impl State {
             time: self.start.elapsed().as_secs_f32(),
             _pad0: 0.0,
             angles: [
-                h / 12.0 * tau,
+                h_for_angle / 12.0 * tau,
                 m / 60.0 * tau,
                 s / 60.0 * tau,
+                0.0,
+            ],
+            time_hms: [
+                h_disp as f32,
+                now.minute() as f32,
+                now.second() as f32,
                 0.0,
             ],
         };
